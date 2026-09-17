@@ -1,6 +1,7 @@
 # --- build wireproxy (userspace WireGuard) ---
-FROM golang:1.23-bookworm AS build
-RUN CGO_ENABLED=0 go install github.com/whyvl/wireproxy/cmd/wireproxy@latest
+FROM golang:1-bookworm AS build
+ENV GOTOOLCHAIN=auto
+RUN CGO_ENABLED=0 go install github.com/whyvl/wireproxy/cmd/wireproxy@v1.1.3
 
 # --- runtime: caddy + wireproxy ---
 FROM caddy:2-alpine
