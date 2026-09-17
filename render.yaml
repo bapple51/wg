@@ -31,8 +31,12 @@ services:
       # --- Claude Code terminal at /claude/ ---
       # "on" publishes an interactive shell into your home LAN, gated only by
       # the basic-auth password below. Leave it "off" unless you want that.
+      # sync: false so the dashboard owns this value: a `value:` here would be
+      # re-applied on every deploy and keep flipping the terminal back off.
+      # Unset still means off - the entrypoint defaults it - so the safe
+      # default survives even though the blueprint no longer states it.
       - key: CLAUDE_TERMINAL
-        value: "off"
+        sync: false
       - key: CLAUDE_TERM_USER
         value: claude
       # Required when CLAUDE_TERMINAL=on. Generate a long random one.
