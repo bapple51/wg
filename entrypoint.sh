@@ -68,6 +68,15 @@ if ! grep -q '\[TCPClientTunnel\]' "$CONF"; then
   } >> "$CONF"
 fi
 
+# Caddy's rewrite needs the LAN origin in three forms: plain, JSON-escaped
+# (Forgejo emits "http:\/\/..." inside JSON), and regex-escaped (the header
+# directive treats its search argument as a regular expression).
+LAN_ORIGIN="${LAN_ORIGIN:-http://${FORGEJO_TARGET}}"
+LAN_ORIGIN_JSON=$(printf '%s' "$LAN_ORIGIN" | sed 's|/|\\/|g')
+LAN_ORIGIN_RE=$(printf '%s' "$LAN_ORIGIN" | sed -e 's/[.[\*^$()+?{}|]/\\&/g')
+export LAN_ORIGIN LAN_ORIGIN_JSON LAN_ORIGIN_RE
+echo "rewriting origin: ${LAN_ORIGIN} -> (relative)"
+
 # Log the config with secrets masked, so bad pastes are easy to spot.
 echo "--- wireproxy config (secrets masked) ---"
 sed -E 's/^([[:space:]]*(PrivateKey|PresharedKey)[[:space:]]*=).*/\1 ***/' "$CONF"

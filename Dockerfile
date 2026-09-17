@@ -1,7 +1,12 @@
+# --- build caddy with the replace-response plugin ---
+# The plugin strips the LAN origin out of response bodies, so Forgejo's
+# ROOT_URL can stay http://192.168.1.156:3000/ with no change on that host.
+FROM caddy:2-builder-alpine AS caddybuild
+RUN xcaddy build --with github.com/caddyserver/replace-response
+
 # --- fetch wireproxy (userspace WireGuard), prebuilt and checksum-verified ---
-# The project moved from whyvl/wireproxy to windtf/wireproxy; the Go module path
-# changed too, which is why `go install github.com/whyvl/...` no longer resolves.
-# Using the release binary avoids the Go toolchain entirely.
+# Note: the project moved from whyvl/wireproxy to windtf/wireproxy, and the Go
+# module path moved with it, so `go install github.com/whyvl/...` fails now.
 FROM alpine:3.20 AS fetch
 ARG WIREPROXY_VERSION=v1.1.3
 ARG TARGETARCH=amd64
@@ -18,14 +23,16 @@ RUN set -eux; \
     tar xzf /tmp/wp.tar.gz -C /usr/local/bin wireproxy; \
     /usr/local/bin/wireproxy --version
 
-# --- runtime: caddy + wireproxy ---
+# --- runtime ---
 FROM caddy:2-alpine
+COPY --from=caddybuild /usr/bin/caddy /usr/bin/caddy
 COPY --from=fetch /usr/local/bin/wireproxy /usr/local/bin/wireproxy
 COPY Caddyfile /etc/caddy/Caddyfile
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh \
     && adduser -D -u 10001 proxy \
-    && mkdir -p /tmp/caddy && chown -R proxy /tmp/caddy
+    && mkdir -p /tmp/caddy && chown -R proxy /tmp/caddy \
+    && caddy list-modules | grep -q replace_response
 USER proxy
 ENV XDG_DATA_HOME=/tmp/caddy \
     XDG_CONFIG_HOME=/tmp/caddy

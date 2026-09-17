@@ -1,8 +1,10 @@
 # forgejo-wg-proxy
 
 Puts a home-LAN Forgejo instance (`192.168.1.156:3000`) behind a public HTTPS URL on
-Render, over a WireGuard tunnel. The full web UI works, login works, `git clone` over
-HTTPS works, and `/clone/<owner>/<repo>` hands you a zip of the repo.
+Render, over a WireGuard tunnel — **without needing any access to the Forgejo host**.
+Caddy rewrites the LAN origin out of responses, so Forgejo's `ROOT_URL` can stay as it
+is and the UI, login, browsing, cloning and pushing all work from a plain browser with
+no VPN on the client.
 
 ```
 browser / git --HTTPS--> Render [ caddy -> wireproxy ] --WireGuard/UDP--> router --> Forgejo
@@ -10,78 +12,65 @@ browser / git --HTTPS--> Render [ caddy -> wireproxy ] --WireGuard/UDP--> router
 
 Two processes in one container:
 
-- **wireproxy** — userspace WireGuard (no `/dev/net/tun` or `NET_ADMIN` needed, which
-  is why this works on Render). Forwards `127.0.0.1:8080` to `192.168.1.156:3000`.
-- **Caddy** — listens on `$PORT`, handles the `/clone` routes, and reverse-proxies
-  everything else to wireproxy with streaming enabled for git smart-HTTP.
+- **wireproxy** — userspace WireGuard (no `/dev/net/tun` or `NET_ADMIN`, which is why
+  this works on Render). Forwards `127.0.0.1:8080` to `192.168.1.156:3000`.
+- **Caddy** — listens on `$PORT`, serves the `/clone` zip routes, strips
+  `http://192.168.1.156:3000` from HTML/JSON/redirects, and streams git traffic through
+  untouched.
 
 ## Step 1 — rotate the WireGuard key
 
-The key you had is compromised. Generate a new pair:
+Generate a fresh pair on a machine you trust:
 
 ```sh
 wg genkey | tee render.key | wg pubkey > render.pub
 ```
 
-On the WireGuard server, replace the old peer's public key with the contents of
-`render.pub`, `AllowedIPs = 10.0.0.5/32`, and delete the old peer entry.
+Add `render.pub` as a peer on the WireGuard server with `AllowedIPs = 10.0.0.5/32`.
+If you can't reach the server right now, the existing key will work — but treat it as
+public and rotate it when you're back.
 
-## Step 2 — point Forgejo at the public URL (required)
-
-This is the step that makes browsing and login actually work. Forgejo builds absolute
-URLs for its CSS/JS assets, login redirects and CSRF cookies from `ROOT_URL`. If that
-still says `http://192.168.1.156:3000/`, a remote browser tries to load assets from your
-LAN IP and you get an unstyled, un-loginable page.
-
-In `app.ini`:
-
-```ini
-[server]
-ROOT_URL = https://<your-service>.onrender.com/
-
-[security]
-; Render terminates TLS; trust its X-Forwarded-* headers
-REVERSE_PROXY_TRUSTED_PROXIES = *
-COOKIE_SECURE = true
-
-[service]
-DISABLE_REGISTRATION = true
-```
-
-Then restart Forgejo. LAN browsing keeps working (links just point at the public
-hostname). SSH clone URLs are unaffected.
-
-`REVERSE_PROXY_TRUSTED_PROXIES = *` is safe only because nothing but this proxy can
-reach Forgejo's port. Don't also expose port 3000 to the internet.
-
-## Step 3 — deploy
+## Step 2 — deploy
 
 1. Push this folder to a GitHub/GitLab repo.
 2. Render → **New → Blueprint** → pick the repo.
-3. When prompted for `WG_CONFIG`, paste the whole WireGuard config (see below).
-4. Deploy, then set `ROOT_URL` (step 2) to the hostname Render assigned.
+3. Paste `WG_CONFIG` when prompted (see below).
+4. Wait for the build. It compiles Caddy with the rewrite plugin, so expect a
+   couple of minutes.
 
 ### WG_CONFIG
 
-One env var holds the entire tunnel config. Paste it raw (multiline works in Render's
-env var editor) or base64 it into a single line:
+One env var holds the whole tunnel config, raw multiline or base64:
+
+```ini
+[Interface]
+PrivateKey = <your key>
+Address = 10.0.0.5/32
+DNS = 192.168.1.105
+MTU = 1280
+
+[Peer]
+PublicKey = n4sIMm33hzPjtVA4keizBz7VvntY/GduwBWY2G6KEAs=
+AllowedIPs = 192.168.1.0/24, 10.0.0.0/24
+Endpoint = shitpanini.duckdns.org:51820
+PersistentKeepalive = 25
+```
+
+Base64 it into a single line if multiline pasting misbehaves:
 
 ```sh
 base64 -w0 < render.conf    # macOS: base64 -i render.conf
 ```
 
 The entrypoint accepts either, strips CRs, drops keys wireproxy rejects
-(`ListenPort`, `Table`, `PostUp`, ...), and appends the `[TCPClientTunnel]` section
-from `FORGEJO_TARGET`. So `WG_CONFIG` stays a plain WireGuard config you can also feed
-to `wg-quick` on a laptop.
-
-On boot the container logs the assembled config with `PrivateKey` and `PresharedKey`
-masked, so a bad paste is obvious in the deploy logs.
+(`ListenPort`, `Table`, `PostUp`, ...), appends the `[TCPClientTunnel]` section from
+`FORGEJO_TARGET`, validates the result with `wireproxy -n`, and logs it with
+`PrivateKey`/`PresharedKey` masked so a bad paste is obvious.
 
 ## Using it
 
-**Browse and log in:** `https://<your-service>.onrender.com/` — normal Forgejo, your
-existing accounts and passwords. Turn on 2FA; this login page is now public.
+**Browse and log in:** `https://<your-service>.onrender.com/` — your existing accounts
+and passwords. Enable 2FA; this login page is now public.
 
 **Download a repo as a zip:**
 
@@ -90,21 +79,31 @@ existing accounts and passwords. Turn on 2FA; this login page is now public.
 | `/clone/brain-blossom/<repo>` | zip of the default branch |
 | `/clone/brain-blossom/<repo>/v1.2` | zip of branch, tag or commit `v1.2` |
 
-These redirect to Forgejo's own `archive/<ref>.zip` endpoint, so private repos still
-require you to be logged in or to pass a token. Change the default branch by editing
-`FORGEJO_DEFAULT_BRANCH` (currently `main`).
-
-Note: `http://192.168.1.156:3000/brain-blossom` is an owner (user or org) page, not a
-repo, so it has no zip of its own. `/clone` needs owner **and** repo.
-
-**Clone with git:**
+**Clone, pull and push:**
 
 ```sh
 git clone https://<user>:<token>@<your-service>.onrender.com/brain-blossom/<repo>.git
 ```
 
-Tokens come from Forgejo → Settings → Applications. HTTPS only; Render doesn't expose
-raw TCP, so no SSH.
+Tokens: Forgejo → Settings → Applications. Push works; git smart-HTTP streams through
+without rewriting or buffering.
+
+## What works, and what doesn't
+
+Works: web UI, login and 2FA, repo browsing, issues, PRs, settings, the API, clone,
+fetch, push, LFS, release downloads, repo zips.
+
+Doesn't, until `ROOT_URL` is changed on the host:
+
+- **SSH cloning** — Render exposes HTTP only, no raw TCP.
+- **Absolute URLs Forgejo generates outside HTML/JSON** — links in notification emails
+  and webhook payloads still say `192.168.1.156:3000`.
+- **OAuth/OIDC logins** — providers redirect to the registered callback, which points
+  at the LAN address. Username/password and tokens are unaffected.
+
+When you're home, set `[server] ROOT_URL = https://<your-service>.onrender.com/` plus
+`[security] REVERSE_PROXY_TRUSTED_PROXIES = *` in `app.ini` and restart. Everything
+above then works properly and the rewrite becomes a harmless no-op.
 
 ## Configuration
 
@@ -113,6 +112,7 @@ raw TCP, so no SSH.
 | `WG_CONFIG` | — | required, secret; whole config, raw or base64 |
 | `FORGEJO_TARGET` | `192.168.1.156:3000` | LAN host:port |
 | `FORGEJO_DEFAULT_BRANCH` | `main` | used by `/clone` |
+| `LAN_ORIGIN` | `http://$FORGEJO_TARGET` | origin to strip; override only if Forgejo's ROOT_URL uses a different host or scheme |
 | `PORT` | `10000` | set by Render |
 
 Fallback vars, used only when `WG_CONFIG` is unset: `WG_PRIVATE_KEY`,
@@ -121,18 +121,17 @@ Fallback vars, used only when `WG_CONFIG` is unset: `WG_PRIVATE_KEY`,
 
 ## Troubleshooting
 
-- **502s / health check failing:** check logs for handshake errors. Verify the DuckDNS
-  name resolves to your current IP, UDP 51820 is port-forwarded, and `render.pub` is on
-  the server. `wg show` on the server tells you whether a handshake happened.
-- **Page loads unstyled, or login bounces you back:** `ROOT_URL` is still the LAN
-  address. Redo step 2 and restart Forgejo.
+- **502s / health check failing:** the logs show the masked config, then WireGuard
+  lines. `Handshake did not complete after 5 seconds` means packets aren't reaching
+  home — check that the DuckDNS name still resolves to your current IP and that UDP
+  51820 is forwarded.
+- **Unstyled page:** the body rewrite didn't fire. Check `LAN_ORIGIN` in the logs
+  matches the origin in Forgejo's HTML exactly, scheme and port included.
 - **Large clones stall:** drop `WG_MTU` to 1200.
-- **Bad paste:** compare the masked config in the deploy logs against `render.conf`.
-- **Local test:** `docker build -t wgp . && docker run --rm -p 10000:10000 -e FORGEJO_TARGET=192.168.1.156:3000 -e WG_CONFIG="$(base64 -w0 < render.conf)" wgp`
+- **Bad paste:** compare the masked config in the deploy logs against your file.
 
 ## Exposure
 
-This is a public login page in front of your home network. Keep registration disabled,
-use 2FA, keep repos private, and consider Render's IP allowlist if you only clone from
-known addresses. Cloudflare Tunnel with Cloudflare Access gives you SSO in front of all
-this for free, if you'd rather not have the login page open to the world.
+This is a public login page in front of your home network: registration disabled, 2FA
+on, strong admin password. Render's IP allowlist helps if you're working from one place.
+Take it down when the trip ends.

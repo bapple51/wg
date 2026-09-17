@@ -1,6 +1,7 @@
 {
 	admin off
 	auto_https off
+	order replace after encode
 	log {
 		output stdout
 		format console
@@ -16,14 +17,35 @@
 	@cloneref path_regexp cloneref ^/clone/([^/]+)/([^/]+)/([^/]+)/?$
 	redir @cloneref /{re.cloneref.1}/{re.cloneref.2}/archive/{re.cloneref.3}.zip 302
 
-	# Everything else goes straight to Forgejo through the tunnel.
-	reverse_proxy 127.0.0.1:8080 {
-		# Render terminates TLS, so tell Forgejo the original scheme.
-		header_up X-Forwarded-Proto https
-		# No response buffering: git smart-HTTP and SSE need streaming.
-		flush_interval -1
-		# Retry briefly while the WireGuard handshake completes after a restart.
-		lb_try_duration 10s
-		lb_try_interval 500ms
+	# Binary and streaming paths: proxied verbatim, never rewritten.
+	# Rewriting git packfiles, LFS objects or zips would corrupt them.
+	@passthrough path */info/refs */git-upload-pack */git-receive-pack */archive/* */raw/* */media/* */releases/download/* */info/lfs/* /assets/* /avatars/* /repo-avatars/* /attachments/*
+	handle @passthrough {
+		reverse_proxy 127.0.0.1:8080 {
+			header_up X-Forwarded-Proto https
+			flush_interval -1
+			request_buffers 0
+			response_buffers 0
+			lb_try_duration 10s
+			lb_try_interval 500ms
+		}
+	}
+
+	# Everything else (HTML, JSON, redirects): strip the LAN origin so links
+	# become same-origin and relative. Needs no change on the Forgejo host.
+	handle {
+		reverse_proxy 127.0.0.1:8080 {
+			header_up X-Forwarded-Proto https
+			# Uncompressed responses, so the body rewrite can see the text.
+			header_up Accept-Encoding identity
+			# Redirects pointing at the LAN origin become relative paths.
+			header_down Location "{$LAN_ORIGIN_RE}" ""
+			header_down Refresh "{$LAN_ORIGIN_RE}" ""
+			request_buffers 0
+			lb_try_duration 10s
+			lb_try_interval 500ms
+		}
+		replace "{$LAN_ORIGIN}" ""
+		replace "{$LAN_ORIGIN_JSON}" ""
 	}
 }
