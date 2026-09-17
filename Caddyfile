@@ -1,0 +1,29 @@
+{
+	admin off
+	auto_https off
+	log {
+		output stdout
+		format console
+	}
+}
+
+:{$PORT:10000} {
+	# /clone/<owner>/<repo>            -> zip of the default branch
+	@clone path_regexp clone ^/clone/([^/]+)/([^/]+)/?$
+	redir @clone /{re.clone.1}/{re.clone.2}/archive/{$FORGEJO_DEFAULT_BRANCH:main}.zip 302
+
+	# /clone/<owner>/<repo>/<ref>      -> zip of a branch, tag or commit
+	@cloneref path_regexp cloneref ^/clone/([^/]+)/([^/]+)/([^/]+)/?$
+	redir @cloneref /{re.cloneref.1}/{re.cloneref.2}/archive/{re.cloneref.3}.zip 302
+
+	# Everything else goes straight to Forgejo through the tunnel.
+	reverse_proxy 127.0.0.1:8080 {
+		# Render terminates TLS, so tell Forgejo the original scheme.
+		header_up X-Forwarded-Proto https
+		# No response buffering: git smart-HTTP and SSE need streaming.
+		flush_interval -1
+		# Retry briefly while the WireGuard handshake completes after a restart.
+		lb_try_duration 10s
+		lb_try_interval 500ms
+	}
+}

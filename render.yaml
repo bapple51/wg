@@ -1,0 +1,47 @@
+services:
+  - type: web
+    name: forgejo-wg-proxy
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # standard = $25/mo. "starter" ($7/mo) is plenty for a byte-forwarding proxy.
+    plan: standard
+    region: frankfurt
+    numInstances: 1
+    autoDeploy: true
+    # Forgejo's health endpoint, reached through the tunnel.
+    healthCheckPath: /api/healthz
+    envVars:
+      - key: PORT
+        value: "10000"
+
+      # The entire WireGuard config, raw multiline or base64.
+      # Secret: Render prompts for it when you create the Blueprint.
+      # The [TCPClientTunnel] section is added automatically from FORGEJO_TARGET.
+      - key: WG_CONFIG
+        sync: false
+
+      # --- Forgejo ---
+      - key: FORGEJO_TARGET
+        value: 192.168.1.156:3000
+      - key: FORGEJO_DEFAULT_BRANCH
+        value: main
+
+      # Optional fallback if you'd rather not use WG_CONFIG: uncomment these
+      # and the entrypoint will assemble the config from them instead.
+      # - key: WG_PRIVATE_KEY
+      #   sync: false
+      # - key: WG_PEER_PUBLIC_KEY
+      #   value: n4sIMm33hzPjtVA4keizBz7VvntY/GduwBWY2G6KEAs=
+      # - key: WG_ENDPOINT
+      #   value: shitpanini.duckdns.org:51820
+      # - key: WG_ADDRESS
+      #   value: 10.0.0.5/32
+      # - key: WG_DNS
+      #   value: 192.168.1.105
+      # - key: WG_MTU
+      #   value: "1280"
+      # - key: WG_ALLOWED_IPS
+      #   value: 192.168.1.0/24, 10.0.0.0/24
+      # - key: WG_KEEPALIVE
+      #   value: "25"
