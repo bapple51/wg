@@ -1,11 +1,26 @@
-# --- build wireproxy (userspace WireGuard) ---
-FROM golang:1-bookworm AS build
-ENV GOTOOLCHAIN=auto
-RUN CGO_ENABLED=0 go install github.com/whyvl/wireproxy/cmd/wireproxy@v1.1.3
+# --- fetch wireproxy (userspace WireGuard), prebuilt and checksum-verified ---
+# The project moved from whyvl/wireproxy to windtf/wireproxy; the Go module path
+# changed too, which is why `go install github.com/whyvl/...` no longer resolves.
+# Using the release binary avoids the Go toolchain entirely.
+FROM alpine:3.20 AS fetch
+ARG WIREPROXY_VERSION=v1.1.3
+ARG TARGETARCH=amd64
+RUN apk add --no-cache curl
+RUN set -eux; \
+    case "$TARGETARCH" in \
+      amd64) sha="e88c1d090740373fc606c1bafd81d9a5eadc642cce5667616e20e9d7a444f51c" ;; \
+      arm64) sha="370e00bd2167960d1ecd1c3c1439715bbaa94a0a110a2040468670c9af6021b6" ;; \
+      *) echo "unsupported arch: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/wp.tar.gz \
+      "https://github.com/windtf/wireproxy/releases/download/${WIREPROXY_VERSION}/wireproxy_linux_${TARGETARCH}.tar.gz"; \
+    echo "${sha}  /tmp/wp.tar.gz" | sha256sum -c -; \
+    tar xzf /tmp/wp.tar.gz -C /usr/local/bin wireproxy; \
+    /usr/local/bin/wireproxy --version
 
 # --- runtime: caddy + wireproxy ---
 FROM caddy:2-alpine
-COPY --from=build /go/bin/wireproxy /usr/local/bin/wireproxy
+COPY --from=fetch /usr/local/bin/wireproxy /usr/local/bin/wireproxy
 COPY Caddyfile /etc/caddy/Caddyfile
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh \
