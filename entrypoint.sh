@@ -73,6 +73,9 @@ echo "--- wireproxy config (secrets masked) ---"
 sed -E 's/^([[:space:]]*(PrivateKey|PresharedKey)[[:space:]]*=).*/\1 ***/' "$CONF"
 echo "-----------------------------------------"
 
+# wireproxy can validate the config before we commit to starting anything.
+wireproxy -n -c "$CONF" || die "wireproxy rejected the config (see above)"
+
 wireproxy -c "$CONF" &
 WG_PID=$!
 
