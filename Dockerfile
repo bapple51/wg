@@ -24,15 +24,28 @@ RUN set -eux; \
     /usr/local/bin/wireproxy --version
 
 # --- runtime ---
-FROM caddy:2-alpine
-COPY --from=caddybuild /usr/bin/caddy /usr/bin/caddy
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates libcap
+
+# Custom caddy goes to its own path. Do NOT overwrite /usr/bin/caddy in the
+# official caddy image: that file carries cap_net_bind_service, and exec'ing a
+# file with file capabilities as a non-root user fails with EPERM.
+COPY --from=caddybuild /usr/bin/caddy /usr/local/bin/caddy
 COPY --from=fetch /usr/local/bin/wireproxy /usr/local/bin/wireproxy
 COPY Caddyfile /etc/caddy/Caddyfile
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh \
-    && adduser -D -u 10001 proxy \
-    && mkdir -p /tmp/caddy && chown -R proxy /tmp/caddy \
-    && caddy list-modules | grep -q replace_response
+
+RUN set -eux; \
+    chmod 0755 /usr/local/bin/caddy /usr/local/bin/wireproxy /usr/local/bin/entrypoint.sh; \
+    chown root:root /usr/local/bin/caddy /usr/local/bin/wireproxy; \
+    setcap -r /usr/local/bin/caddy 2>/dev/null || true; \
+    adduser -D -u 10001 proxy; \
+    mkdir -p /tmp/caddy && chown -R proxy /tmp/caddy; \
+    /usr/local/bin/caddy version; \
+    /usr/local/bin/caddy list-modules | grep -q replace_response; \
+    PORT=10000 LAN_ORIGIN=x LAN_ORIGIN_JSON=x LAN_ORIGIN_RE=x \
+      /usr/local/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
 USER proxy
 ENV XDG_DATA_HOME=/tmp/caddy \
     XDG_CONFIG_HOME=/tmp/caddy
