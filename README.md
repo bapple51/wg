@@ -10,13 +10,16 @@ no VPN on the client.
 browser / git --HTTPS--> Render [ caddy -> wireproxy ] --WireGuard/UDP--> router --> Forgejo
 ```
 
-Two processes in one container:
+Three processes in one container:
 
 - **wireproxy** — userspace WireGuard (no `/dev/net/tun` or `NET_ADMIN`, which is why
   this works on Render). Forwards `127.0.0.1:8080` to `192.168.1.156:3000`.
 - **Caddy** — listens on `$PORT`, serves the `/clone` zip routes, strips
   `http://192.168.1.156:3000` from HTML/JSON/redirects, and streams git traffic through
   untouched.
+- **ttyd** — optional; serves a Claude Code terminal at `/claude/`, password-gated
+  by Caddy. Off unless `CLAUDE_TERMINAL=on`. See
+  [Claude Code in the browser](#claude-code-in-the-browser).
 
 ## Step 1 — rotate the WireGuard key
 
@@ -88,6 +91,90 @@ git clone https://<user>:<token>@<your-service>.onrender.com/brain-blossom/<repo
 Tokens: Forgejo → Settings → Applications. Push works; git smart-HTTP streams through
 without rewriting or buffering.
 
+## Claude Code in the browser
+
+`https://<your-service>.onrender.com/claude/` is a full Claude Code terminal running
+*inside* the container, on the LAN side of the tunnel. Claude can clone, edit, commit
+and push your Forgejo repos over `http://127.0.0.1:8080` without any of it leaving the
+tunnel, and you get to it from any browser with no VPN.
+
+It is **off by default**. Turning it on publishes an interactive shell into your home
+network behind one password — read [Exposure](#exposure) before you do.
+
+### Turning it on
+
+1. Pick a long random password:
+
+   ```sh
+   openssl rand -base64 24
+   ```
+
+2. In Render → your service → **Environment**, set:
+
+   | Variable | Value |
+   |---|---|
+   | `CLAUDE_TERMINAL` | `on` |
+   | `CLAUDE_TERM_PASSWORD` | the password from step 1 |
+   | `ANTHROPIC_API_KEY` | your API key |
+
+   On a Pro/Max subscription instead of an API key: run `claude setup-token` on your
+   own machine, then set `CLAUDE_CODE_OAUTH_TOKEN` to what it prints and leave
+   `ANTHROPIC_API_KEY` unset.
+
+3. To let Claude push, add `FORGEJO_USER` and `FORGEJO_TOKEN` (Forgejo → Settings →
+   Applications). The entrypoint writes them to `~/.git-credentials` and maps
+   `http://192.168.1.156:3000/` to the tunnel, so URLs copied straight out of the
+   Forgejo UI clone without editing.
+
+4. Redeploy. The logs should say `claude terminal: /claude/ (basic auth user: claude)`.
+
+### Using it
+
+Open `/claude/`, enter the username (`claude` unless you changed `CLAUDE_TERM_USER`)
+and password, and you land in Claude Code in `/workspace`:
+
+```sh
+git clone http://127.0.0.1:8080/brain-blossom/<repo>.git
+cd <repo>
+# then just talk to Claude
+```
+
+If Claude exits, the tab drops to a shell rather than dying — type `claude` to start
+again.
+
+**`/workspace` is ephemeral.** Every deploy and every restart wipes it, so push
+anything you care about. `render.yaml` has a commented-out disk block if you'd rather
+it stuck around.
+
+### Knobs
+
+| Variable | Default | Notes |
+|---|---|---|
+| `CLAUDE_TERMINAL` | `off` | `on` enables the terminal and its route |
+| `CLAUDE_TERM_USER` | `claude` | basic-auth username |
+| `CLAUDE_TERM_PASSWORD` | — | secret; required when `CLAUDE_TERMINAL=on` |
+| `CLAUDE_TERM_MAX_CLIENTS` | `2` | concurrent browser sessions |
+| `ANTHROPIC_API_KEY` | — | secret; or use `CLAUDE_CODE_OAUTH_TOKEN` |
+| `CLAUDE_CODE_OAUTH_TOKEN` | — | secret; from `claude setup-token` |
+| `FORGEJO_USER` / `FORGEJO_TOKEN` | — | secret; git credentials for pushing |
+| `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | `Claude` / `claude@localhost` | commit identity |
+
+### How it's wired
+
+ttyd runs on `127.0.0.1:7681` with `--base-path /claude`, so its own asset and
+websocket URLs already carry the prefix and Caddy passes the path through untouched.
+Caddy does the authentication; ttyd is told to trust the header Caddy sets
+(`--auth-header`) instead of challenging the websocket separately.
+
+wireproxy and Caddy are the service — if either dies the container exits and Render
+restarts it. ttyd is an add-on, so a crash there is respawned in place (five attempts)
+and never takes the proxy down with it.
+
+Alpine notes, in case you edit the Dockerfile: ripgrep comes from `apk`, not from the
+copy bundled with Claude Code, because that one is glibc-linked and will not run on
+musl — hence `USE_BUILTIN_RIPGREP=0`. `bash` is installed because Claude shells out
+expecting it rather than busybox `ash`.
+
 ## What works, and what doesn't
 
 Works: web UI, login and 2FA, repo browsing, issues, PRs, settings, the API, clone,
@@ -114,6 +201,7 @@ above then works properly and the rewrite becomes a harmless no-op.
 | `FORGEJO_DEFAULT_BRANCH` | `main` | used by `/clone` |
 | `LAN_ORIGIN` | `http://$FORGEJO_TARGET` | origin to strip; override only if Forgejo's ROOT_URL uses a different host or scheme |
 | `PORT` | `10000` | set by Render |
+| `CLAUDE_TERMINAL` | `off` | Claude Code terminal at `/claude/`; see [its own table](#knobs) |
 
 Fallback vars, used only when `WG_CONFIG` is unset: `WG_PRIVATE_KEY`,
 `WG_PEER_PUBLIC_KEY`, `WG_ENDPOINT`, `WG_ADDRESS`, `WG_DNS`, `WG_MTU`,
@@ -129,9 +217,26 @@ Fallback vars, used only when `WG_CONFIG` is unset: `WG_PRIVATE_KEY`,
   matches the origin in Forgejo's HTML exactly, scheme and port included.
 - **Large clones stall:** drop `WG_MTU` to 1200.
 - **Bad paste:** compare the masked config in the deploy logs against your file.
+- **`/claude/` returns 401 forever:** the password is wrong, or `CLAUDE_TERMINAL`
+  isn't `on` — when it's off the route is deliberately sealed with a random
+  password. The startup log line tells you which.
+- **`/claude/` loads but the terminal stays blank:** the websocket didn't
+  authenticate. Browsers only replay basic-auth credentials on a websocket after
+  the page itself was authenticated, so do a hard reload of `/claude/` rather than
+  opening a deep link, and check the logs for `ttyd: exited, restarting`.
+- **502 on `/claude/` only:** ttyd died. The proxy stays up by design; the logs say
+  how many restarts it has had.
 
 ## Exposure
 
 This is a public login page in front of your home network: registration disabled, 2FA
 on, strong admin password. Render's IP allowlist helps if you're working from one place.
 Take it down when the trip ends.
+
+With `CLAUDE_TERMINAL=on` it is also a public **shell** on the LAN side of the
+tunnel, and a single basic-auth password is the only thing in front of it. Anyone
+who guesses or replays it gets a root-less but fully interactive session that can
+reach `192.168.1.0/24` — not just Forgejo. If you turn it on: use a long random
+password, add Render's IP allowlist, and set `CLAUDE_TERMINAL=off` again the moment
+you stop needing it. Your `ANTHROPIC_API_KEY` and `FORGEJO_TOKEN` are readable from
+that session too, so rotate them if the password ever leaks.

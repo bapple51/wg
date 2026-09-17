@@ -4,7 +4,8 @@ services:
     runtime: docker
     dockerfilePath: ./Dockerfile
     dockerContext: .
-    # standard = $25/mo. "starter" ($7/mo) is plenty for a byte-forwarding proxy.
+    # standard = $25/mo. "starter" ($7/mo) is plenty for a byte-forwarding proxy,
+    # but Claude Code wants memory: stay on standard if you enable the terminal.
     plan: standard
     region: frankfurt
     numInstances: 1
@@ -27,6 +28,31 @@ services:
       - key: FORGEJO_DEFAULT_BRANCH
         value: main
 
+      # --- Claude Code terminal at /claude/ ---
+      # "on" publishes an interactive shell into your home LAN, gated only by
+      # the basic-auth password below. Leave it "off" unless you want that.
+      - key: CLAUDE_TERMINAL
+        value: "off"
+      - key: CLAUDE_TERM_USER
+        value: claude
+      # Required when CLAUDE_TERMINAL=on. Generate a long random one.
+      - key: CLAUDE_TERM_PASSWORD
+        sync: false
+      # How Claude authenticates. Set exactly one.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      # Subscription (Pro/Max) instead of an API key: create the token locally
+      # with `claude setup-token`, then set it here and drop ANTHROPIC_API_KEY.
+      # - key: CLAUDE_CODE_OAUTH_TOKEN
+      #   sync: false
+
+      # Lets git clone/push against Forgejo through the tunnel without
+      # prompting. Token: Forgejo -> Settings -> Applications.
+      - key: FORGEJO_USER
+        sync: false
+      - key: FORGEJO_TOKEN
+        sync: false
+
       # Optional fallback if you'd rather not use WG_CONFIG: uncomment these
       # and the entrypoint will assemble the config from them instead.
       # - key: WG_PRIVATE_KEY
@@ -45,3 +71,14 @@ services:
       #   value: 192.168.1.0/24, 10.0.0.0/24
       # - key: WG_KEEPALIVE
       #   value: "25"
+
+    # /workspace is ephemeral: every deploy and restart wipes whatever Claude
+    # was working on. Uncomment to keep it (adds cost, pins you to 1 instance).
+    # Two caveats: Render mounts the disk root-owned, so the container has to be
+    # able to chown it to uid 10001 or Claude gets a read-only workspace; and
+    # this does NOT persist ~/.claude, so use ANTHROPIC_API_KEY or
+    # CLAUDE_CODE_OAUTH_TOKEN rather than relying on a saved interactive login.
+    # disk:
+    #   name: workspace
+    #   mountPath: /workspace
+    #   sizeGB: 5

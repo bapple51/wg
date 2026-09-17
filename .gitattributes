@@ -1,0 +1,10 @@
+# These are copied into a Linux image and executed there. A CRLF checkout on a
+# Windows clone makes the shebang `#!/bin/sh\r`, and the container dies with a
+# confusing "no such file or directory". Pin them to LF regardless of
+# core.autocrlf.
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+Caddyfile       text eol=lf
+entrypoint.sh   text eol=lf
+*.yaml          text eol=lf
+*.yml           text eol=lf

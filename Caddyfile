@@ -17,6 +17,26 @@
 	@cloneref path_regexp cloneref ^/clone/([^/]+)/([^/]+)/([^/]+)/?$
 	redir @cloneref /{re.cloneref.1}/{re.cloneref.2}/archive/{re.cloneref.3}.zip 302
 
+	# --- Claude Code terminal -------------------------------------------------
+	# ttyd runs on loopback with --base-path /claude, so its own asset and
+	# websocket URLs already carry the prefix and `handle` can pass the path
+	# through untouched. Caddy does the authentication; ttyd trusts the header
+	# Caddy sets (-H) rather than challenging a second time on the websocket.
+	# When CLAUDE_TERMINAL is off the entrypoint installs a random hash here, so
+	# the route exists but nobody can get through it.
+	redir /claude /claude/ 308
+	handle /claude/* {
+		basic_auth {
+			{$CLAUDE_TERM_USER:claude} {$CLAUDE_TERM_HASH}
+		}
+		reverse_proxy 127.0.0.1:7681 {
+			header_up X-Forwarded-Proto https
+			header_up X-Claude-User {http.auth.user.id}
+			# Terminal traffic is interactive: never buffer it.
+			flush_interval -1
+		}
+	}
+
 	# Binary and streaming paths: proxied verbatim, never rewritten.
 	# Rewriting git packfiles, LFS objects or zips would corrupt them.
 	@passthrough path */info/refs */git-upload-pack */git-receive-pack */archive/* */raw/* */media/* */releases/download/* */info/lfs/* /assets/* /avatars/* /repo-avatars/* /attachments/*
