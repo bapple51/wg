@@ -26,9 +26,18 @@ if [ "$(id -u)" = "0" ]; then
   cd /
 
   if [ -d "$DATA_DIR" ]; then
-    mkdir -p "$DATA_DIR/workspace" "$DATA_DIR/claude" "$DATA_DIR/logs" \
+    mkdir -p "$DATA_DIR/workspace" "$DATA_DIR/home" "$DATA_DIR/logs" \
              "$DATA_DIR/tasks" "$DATA_DIR/spool"
-    chown proxy:proxy "$DATA_DIR" "$DATA_DIR/workspace" "$DATA_DIR/claude" \
+
+    # Migrate the first layout, which persisted only ~/.claude. Claude keeps
+    # ~/.claude.json *next to* that directory, so it stayed on the ephemeral
+    # filesystem and vanished on every restart, taking the login with it.
+    if [ -d "$DATA_DIR/claude" ] && [ ! -e "$DATA_DIR/home/.claude" ]; then
+      echo "disk: migrating $DATA_DIR/claude -> $DATA_DIR/home/.claude"
+      mv "$DATA_DIR/claude" "$DATA_DIR/home/.claude"
+    fi
+
+    chown proxy:proxy "$DATA_DIR" "$DATA_DIR/workspace" "$DATA_DIR/home" \
                       "$DATA_DIR/logs" "$DATA_DIR/tasks" "$DATA_DIR/spool"
 
     # A recursive chown of a full 15GB disk on every boot would be minutes of
@@ -44,13 +53,15 @@ if [ "$(id -u)" = "0" ]; then
     # directory in a fresh image; on a restart it is already this symlink.
     [ -L /workspace ] || rm -rf /workspace
     ln -sfn "$DATA_DIR/workspace" /workspace
-    # Claude's history, config and any interactive login live here. Without
-    # this, every deploy would start Claude from nothing. Clear a real
-    # directory first: ln -sfn would otherwise nest the link inside it.
-    [ -L /home/proxy/.claude ] || rm -rf /home/proxy/.claude
-    ln -sfn "$DATA_DIR/claude" /home/proxy/.claude
+    # The whole home directory, not just ~/.claude: Claude also writes
+    # ~/.claude.json, and symlinking that single file would not survive either,
+    # because an atomic rewrite (temp file + rename) replaces the symlink with
+    # a real file. Persisting the directory sidesteps both problems and picks
+    # up ~/.git-credentials and anything else Claude decides to keep.
+    [ -L /home/proxy ] || rm -rf /home/proxy
+    ln -sfn "$DATA_DIR/home" /home/proxy
 
-    echo "disk: $DATA_DIR mounted; /workspace and ~/.claude persist"
+    echo "disk: $DATA_DIR mounted; /workspace and /home/proxy persist"
   else
     echo "WARNING: $DATA_DIR is not mounted - /workspace and Claude's history"
     echo "WARNING: are ephemeral and will be lost on the next deploy."

@@ -253,7 +253,7 @@ Layout on the disk:
 
 ```
 /data/workspace   <- /workspace      repos and working files
-/data/claude      <- ~/.claude       history, config, login
+/data/home        <- /home/proxy     ~/.claude, ~/.claude.json, credentials
 /data/tasks/crontab                  your schedule (edit this)
 /data/logs/                          task output, cron.log
 /data/spool/proxy                    copied from tasks/crontab at boot
@@ -318,8 +318,11 @@ Fallback vars, used only when `WG_CONFIG` is unset: `WG_PRIVATE_KEY`,
 - **Permission denied all over `/workspace`:** the disk chown didn't happen. The boot
   log should say `disk: /data mounted`; if it says `WARNING: /data is not mounted`, the
   mount path in Render isn't `/data`.
-- **Claude starts fresh every deploy:** `~/.claude` isn't landing on the disk. Check
-  for the `disk:` line above and that `/data/claude` exists.
+- **Claude starts fresh every deploy, or says `Claude configuration file not found at
+  /home/proxy/.claude.json`:** the home directory isn't landing on the disk. Check for
+  `disk: /data mounted; /workspace and /home/proxy persist` in the boot log, and that
+  `/home/proxy` is a symlink to `/data/home`. Persisting only `~/.claude` is not
+  enough — `~/.claude.json` sits beside it, not inside it.
 - **A cron job never runs:** the boot log prints how many active jobs it parsed —
   `cron: no active jobs` means every line in `/data/tasks/crontab` is still commented.
   Otherwise check `/data/logs/cron.log` for the fire, and
