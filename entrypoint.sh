@@ -184,17 +184,28 @@ git config --global --add safe.directory '*'
 # CLAUDE_CODE_OAUTH_TOKEN already authenticates it, and follows up with a trust
 # prompt for the working directory. A cron job cannot answer either, and in the
 # browser terminal they are just noise on a box that is already authenticated.
-# Seed the answers only when the file is absent - it is Claude's own config and
-# it owns the contents from here on.
+# Merge rather than create: `claude --print` writes this file without ever
+# onboarding, so by the time anyone opens the terminal it usually exists
+# already and is simply missing the flags. Creating it only when absent looked
+# right and did nothing.
 CLAUDE_JSON="$HOME/.claude.json"
-if [ ! -e "$CLAUDE_JSON" ]; then
-  cat > "$CLAUDE_JSON" <<'JSONEOF'
-{
-  "hasCompletedOnboarding": true,
-  "hasTrustDialogAccepted": true,
-  "bypassPermissionsModeAccepted": true
-}
-JSONEOF
+CLAUDE_FLAGS='.hasCompletedOnboarding = true
+            | .hasTrustDialogAccepted = true
+            | .bypassPermissionsModeAccepted = true'
+
+if [ -s "$CLAUDE_JSON" ]; then
+  CLAUDE_TMP=$(mktemp)
+  if jq "$CLAUDE_FLAGS" "$CLAUDE_JSON" > "$CLAUDE_TMP" 2>/dev/null; then
+    # Write through the existing file rather than renaming over it, so Claude's
+    # own permissions and inode survive.
+    cat "$CLAUDE_TMP" > "$CLAUDE_JSON"
+    echo "claude: first-run prompts pre-answered in $CLAUDE_JSON"
+  else
+    echo "claude: WARNING $CLAUDE_JSON is not valid JSON, leaving it alone" >&2
+  fi
+  rm -f "$CLAUDE_TMP"
+else
+  printf '{}' | jq "$CLAUDE_FLAGS" > "$CLAUDE_JSON"
   chmod 600 "$CLAUDE_JSON"
   echo "claude: seeded $CLAUDE_JSON (onboarding and trust prompts pre-answered)"
 fi
