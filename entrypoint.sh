@@ -1,6 +1,6 @@
 #!/bin/sh
-# Starts wireproxy (userspace WireGuard), then ttyd (optional Claude Code
-# terminal), then Caddy, and supervises the lot.
+# Starts wireproxy (userspace WireGuard), a persistent Claude Code session in
+# tmux, cron for unattended tasks, ttyd to view the session, and Caddy.
 #
 # WireGuard config comes from either:
 #   WG_CONFIG  - a whole wg-quick style config, raw multiline or base64 (preferred)
@@ -11,6 +11,50 @@
 set -eu
 
 die() { echo "ERROR: $*" >&2; exit 1; }
+
+DATA_DIR="${DATA_DIR:-/data}"
+
+# --- root phase: prepare the persistent disk, then drop privileges ----------
+# Render mounts disks root-owned and everything else here runs as uid 10001, so
+# this is the one thing that genuinely needs root. It ends in exec, so the
+# unprivileged shell inherits PID 1 and Render's signals still land on it.
+if [ "$(id -u)" = "0" ]; then
+  if [ -d "$DATA_DIR" ]; then
+    mkdir -p "$DATA_DIR/workspace" "$DATA_DIR/claude" "$DATA_DIR/logs" \
+             "$DATA_DIR/tasks" "$DATA_DIR/spool"
+    chown proxy:proxy "$DATA_DIR" "$DATA_DIR/workspace" "$DATA_DIR/claude" \
+                      "$DATA_DIR/logs" "$DATA_DIR/tasks" "$DATA_DIR/spool"
+
+    # A recursive chown of a full 15GB disk on every boot would be minutes of
+    # dead air, so do it once and leave a marker.
+    if [ ! -e "$DATA_DIR/.initialized" ]; then
+      echo "disk: first run, taking ownership of $DATA_DIR"
+      chown -R proxy:proxy "$DATA_DIR"
+      : > "$DATA_DIR/.initialized"
+      chown proxy:proxy "$DATA_DIR/.initialized"
+    fi
+
+    # Point the paths baked into the image at the disk. /workspace is an empty
+    # directory in a fresh image; on a restart it is already this symlink.
+    [ -L /workspace ] || rm -rf /workspace
+    ln -sfn "$DATA_DIR/workspace" /workspace
+    # Claude's history, config and any interactive login live here. Without
+    # this, every deploy would start Claude from nothing. Clear a real
+    # directory first: ln -sfn would otherwise nest the link inside it.
+    [ -L /home/proxy/.claude ] || rm -rf /home/proxy/.claude
+    ln -sfn "$DATA_DIR/claude" /home/proxy/.claude
+
+    echo "disk: $DATA_DIR mounted; /workspace and ~/.claude persist"
+  else
+    echo "WARNING: $DATA_DIR is not mounted - /workspace and Claude's history"
+    echo "WARNING: are ephemeral and will be lost on the next deploy."
+    mkdir -p /workspace
+    chown proxy:proxy /workspace
+  fi
+
+  exec su-exec proxy "$0" "$@"
+fi
+# --- everything below runs as proxy (uid 10001) ----------------------------
 
 [ -n "${FORGEJO_TARGET:-}" ] || die "FORGEJO_TARGET is required (e.g. 192.168.1.156:3000)"
 
@@ -154,6 +198,49 @@ trap 'kill -TERM "$WG_PID" 2>/dev/null; exit 0' TERM INT
 # Give the handshake a moment; Caddy retries connections anyway (lb_try_duration).
 sleep 3
 
+# --- the persistent Claude session -----------------------------------------
+# tmux owns this, not ttyd. It is created once at boot and survives every tab
+# close, every reconnect, and ttyd crashing or being disabled.
+if [ "$CLAUDE_TERMINAL" = "on" ]; then
+  if tmux has-session -t claude 2>/dev/null; then
+    echo "claude session: already running"
+  else
+    tmux new-session -d -s claude -c /workspace /usr/local/bin/claude-shell
+    echo "claude session: started (tmux session 'claude', detached)"
+  fi
+fi
+
+# --- scheduled tasks --------------------------------------------------------
+# Edit $DATA_DIR/tasks/crontab on the disk; it is copied into the spool each
+# boot. Jobs run as proxy, in UTC.
+CRON_PID=""
+if [ ! -e "$DATA_DIR/tasks/crontab" ] && [ -d "$DATA_DIR/tasks" ]; then
+  cat > "$DATA_DIR/tasks/crontab" <<'CRONEOF'
+# Scheduled Claude tasks. Standard 5-field cron, times are UTC.
+# Jobs run as `proxy`. Logs land in /data/logs/<name>-<timestamp>.log.
+#
+#   claude-task <name> <prompt...>
+#   claude-task <name> -f /data/tasks/prompts/<file>
+#
+# Uncomment to try it: writes a line into the log every 15 minutes.
+# */15 * * * * claude-task heartbeat "Reply with the single word: alive"
+#
+# A real one - nightly digest of a repo:
+# 0 3 * * * cd /workspace/myrepo && git pull -q && claude-task nightly "Summarize commits from the last 24h into NOTES.md, then commit and push"
+CRONEOF
+  echo "cron: seeded $DATA_DIR/tasks/crontab (all jobs commented out)"
+fi
+
+if [ -s "$DATA_DIR/tasks/crontab" ] && grep -qE '^[^#[:space:]]' "$DATA_DIR/tasks/crontab"; then
+  cp "$DATA_DIR/tasks/crontab" "$DATA_DIR/spool/proxy"
+  chmod 600 "$DATA_DIR/spool/proxy"
+  crond -f -c "$DATA_DIR/spool" -L "$DATA_DIR/logs/cron.log" &
+  CRON_PID=$!
+  echo "cron: running $(grep -cE '^[^#[:space:]]' "$DATA_DIR/tasks/crontab") job(s)"
+else
+  echo "cron: no active jobs in $DATA_DIR/tasks/crontab"
+fi
+
 TTYD_PID=""
 TTYD_FAILS=0
 if [ "$CLAUDE_TERMINAL" = "on" ]; then
@@ -170,7 +257,13 @@ XDG_DATA_HOME=/tmp/caddy XDG_CONFIG_HOME=/tmp/caddy \
   caddy run --config /etc/caddy/Caddyfile --adapter caddyfile &
 CADDY_PID=$!
 
-trap 'kill -TERM "$WG_PID" "$CADDY_PID" ${TTYD_PID:-} 2>/dev/null; exit 0' TERM INT
+shutdown() {
+  # Ask tmux to end the session cleanly so Claude can flush its history to the
+  # disk, rather than having the server killed out from under it.
+  tmux kill-server 2>/dev/null || true
+  kill -TERM "$WG_PID" "$CADDY_PID" ${TTYD_PID:-} ${CRON_PID:-} 2>/dev/null || true
+}
+trap 'shutdown; exit 0' TERM INT
 
 # wireproxy and caddy are the service: if either dies, exit non-zero so Render
 # restarts the container. ttyd is an add-on, so a crash there is respawned in
@@ -191,5 +284,5 @@ while kill -0 "$WG_PID" 2>/dev/null && kill -0 "$CADDY_PID" 2>/dev/null; do
 done
 
 echo "ERROR: wireproxy or caddy exited; shutting down" >&2
-kill -TERM "$WG_PID" "$CADDY_PID" ${TTYD_PID:-} 2>/dev/null || true
+shutdown
 exit 1

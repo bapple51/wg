@@ -30,9 +30,11 @@ FROM alpine:3.20
 # from apk on purpose: Claude Code ships a glibc-linked ripgrep that will not
 # run on musl, so we point it at the system one with USE_BUILTIN_RIPGREP=0.
 # bash is here because Claude Code shells out expecting bash, not busybox ash.
+# tmux keeps the Claude session alive independently of any browser tab, and
+# su-exec drops root after the entrypoint has chown'd the Render disk.
 RUN apk add --no-cache \
-      ca-certificates libcap \
-      ttyd bash git curl jq less ripgrep \
+      ca-certificates libcap su-exec \
+      ttyd tmux bash git curl jq less ripgrep \
       nodejs npm
 
 # Claude Code itself. Pinned by the tag you deploy; bump deliberately.
@@ -50,10 +52,13 @@ COPY --from=fetch /usr/local/bin/wireproxy /usr/local/bin/wireproxy
 COPY Caddyfile /etc/caddy/Caddyfile
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY claude-session.sh /usr/local/bin/claude-session
+COPY claude-shell.sh /usr/local/bin/claude-shell
+COPY claude-task.sh /usr/local/bin/claude-task
 
 RUN set -eux; \
     chmod 0755 /usr/local/bin/caddy /usr/local/bin/wireproxy \
-               /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session; \
+               /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
+               /usr/local/bin/claude-shell /usr/local/bin/claude-task; \
     chown root:root /usr/local/bin/caddy /usr/local/bin/wireproxy; \
     setcap -r /usr/local/bin/caddy 2>/dev/null || true; \
     adduser -D -u 10001 proxy; \
@@ -66,13 +71,16 @@ RUN set -eux; \
     CLAUDE_TERM_HASH='$2a$14$Zkx19XLiW6VYouLHR5NmfOFU0z2GTNmpkT/5qqR7hx4IjWJPDhjvG' \
       /usr/local/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 
-USER proxy
+# Deliberately no `USER proxy`: Render mounts the /data disk root-owned, so the
+# entrypoint starts as root purely to chown it, then execs su-exec proxy before
+# anything else runs. Nothing that touches the network or Claude runs as root.
 WORKDIR /workspace
 
 # HOME must be explicit: Docker defaults it to / regardless of the passwd entry,
-# and Claude Code needs a writable ~/.claude. The XDG vars that used to live
-# here moved into entrypoint.sh, scoped to the caddy process only, so they no
-# longer redirect Claude's config into caddy's state directory.
+# and Claude Code needs a writable ~/.claude (symlinked onto the disk at boot).
+# The XDG vars that used to live here moved into entrypoint.sh, scoped to the
+# caddy process only, so they no longer redirect Claude's config into caddy's
+# state directory.
 ENV HOME=/home/proxy \
     SHELL=/bin/bash \
     USE_BUILTIN_RIPGREP=0 \

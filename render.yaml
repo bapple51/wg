@@ -46,6 +46,17 @@ services:
       # - key: CLAUDE_CODE_OAUTH_TOKEN
       #   sync: false
 
+      # --- unattended tasks ---
+      # Flags claude-task passes to `claude --print`. The default bypasses all
+      # permission checks, because a cron job has nobody to approve tool calls.
+      # Narrow it if you can, e.g.
+      #   --allowedTools "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*)"
+      # - key: CLAUDE_TASK_FLAGS
+      #   value: --dangerously-skip-permissions
+      # Days of task logs to keep in /data/logs.
+      - key: CLAUDE_TASK_LOG_DAYS
+        value: "14"
+
       # Lets git clone/push against Forgejo through the tunnel without
       # prompting. Token: Forgejo -> Settings -> Applications.
       - key: FORGEJO_USER
@@ -72,13 +83,12 @@ services:
       # - key: WG_KEEPALIVE
       #   value: "25"
 
-    # /workspace is ephemeral: every deploy and restart wipes whatever Claude
-    # was working on. Uncomment to keep it (adds cost, pins you to 1 instance).
-    # Two caveats: Render mounts the disk root-owned, so the container has to be
-    # able to chown it to uid 10001 or Claude gets a read-only workspace; and
-    # this does NOT persist ~/.claude, so use ANTHROPIC_API_KEY or
-    # CLAUDE_CODE_OAUTH_TOKEN rather than relying on a saved interactive login.
-    # disk:
-    #   name: workspace
-    #   mountPath: /workspace
-    #   sizeGB: 5
+    # Persistent disk. /workspace and ~/.claude are both symlinked onto it at
+    # boot, so repos, Claude's conversation history and any interactive login
+    # all survive deploys and restarts.
+    # Render mounts it root-owned, which is why the entrypoint starts as root
+    # solely to chown it and then drops to uid 10001 via su-exec.
+    disk:
+      name: claude-data
+      mountPath: /data
+      sizeGB: 15

@@ -17,8 +17,9 @@ Three processes in one container:
 - **Caddy** — listens on `$PORT`, serves the `/clone` zip routes, strips
   `http://192.168.1.156:3000` from HTML/JSON/redirects, and streams git traffic through
   untouched.
-- **ttyd** — optional; serves a Claude Code terminal at `/claude/`, password-gated
-  by Caddy. Off unless `CLAUDE_TERMINAL=on`. See
+- **ttyd + tmux** — optional; a persistent Claude Code session, viewable at `/claude/`
+  and password-gated by Caddy. It keeps running with no tab open, and `cron` drives
+  unattended tasks against it. Off unless `CLAUDE_TERMINAL=on`. See
   [Claude Code in the browser](#claude-code-in-the-browser).
 
 ## Step 1 — rotate the WireGuard key
@@ -139,12 +140,50 @@ cd <repo>
 # then just talk to Claude
 ```
 
-If Claude exits, the tab drops to a shell rather than dying — type `claude` to start
-again.
+### The session outlives the tab
 
-**`/workspace` is ephemeral.** Every deploy and every restart wipes it, so push
-anything you care about. `render.yaml` has a commented-out disk block if you'd rather
-it stuck around.
+Claude does **not** stop when you close the browser. The real session is a tmux
+session named `claude`, started by the entrypoint at boot; ttyd only attaches to it.
+Closing the tab detaches, exactly like `Ctrl-b d`. Reopen `/claude/` and you are back
+in the same live session, mid-task if it was mid-task.
+
+That means you can kick off a long job, close the laptop, and come back to it. The
+things that *do* end it:
+
+| | ends the session? |
+|---|---|
+| closing the tab / losing the network | no, detaches |
+| ttyd crashing | no, it is respawned and reattaches |
+| typing `exit` in the shell | **yes** — use `Ctrl-b d` to leave |
+| Render deploy or restart | yes, but see below |
+
+A restart kills the process, but not your work: `/workspace` and `~/.claude` both live
+on the `/data` disk, so the repos are intact and `claude --continue` picks the
+conversation back up. `claude-shell` does that automatically on boot.
+
+### Scheduled tasks
+
+Unattended runs are plain cron. Edit `/data/tasks/crontab` — it persists, and is
+reloaded into the spool on every boot:
+
+```cron
+# 5-field cron, UTC, runs as `proxy`.
+0 3 * * * cd /workspace/myrepo && git pull -q && claude-task nightly "Summarize commits from the last 24h into NOTES.md, then commit and push"
+```
+
+`claude-task <name> <prompt>` runs `claude --print` and writes everything to
+`/data/logs/<name>-<timestamp>.log`, with `<name>-latest.log` pointing at the newest.
+Long prompts can live in a file: `claude-task <name> -f /data/tasks/prompts/foo.md`.
+
+The entrypoint seeds `/data/tasks/crontab` with a commented example on first boot, and
+logs how many active jobs it found. Logs older than `CLAUDE_TASK_LOG_DAYS` (14) are
+pruned after each run.
+
+> **Permissions.** Nobody is there to approve a tool call at 3am, so `claude-task`
+> defaults to `--dangerously-skip-permissions`. Inside this container that means
+> Claude can run anything, against a network that reaches your whole LAN. Narrow it
+> where you can by setting `CLAUDE_TASK_FLAGS`, e.g.
+> `--allowedTools "Read,Grep,Glob,Bash(git log:*)"`.
 
 ### Knobs
 
@@ -158,6 +197,10 @@ it stuck around.
 | `CLAUDE_CODE_OAUTH_TOKEN` | — | secret; from `claude setup-token` |
 | `FORGEJO_USER` / `FORGEJO_TOKEN` | — | secret; git credentials for pushing |
 | `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | `Claude` / `claude@localhost` | commit identity |
+| `CLAUDE_TASK_FLAGS` | `--dangerously-skip-permissions` | what `claude-task` passes to `claude --print` |
+| `CLAUDE_TASK_DIR` | `/workspace` | working directory for scheduled tasks |
+| `CLAUDE_TASK_LOG_DAYS` | `14` | days of task logs to keep |
+| `DATA_DIR` | `/data` | the persistent disk mount |
 
 ### How it's wired
 
@@ -166,9 +209,29 @@ websocket URLs already carry the prefix and Caddy passes the path through untouc
 Caddy does the authentication; ttyd is told to trust the header Caddy sets
 (`--auth-header`) instead of challenging the websocket separately.
 
+ttyd's command is not Claude — it is `tmux new-session -A -s claude`. That indirection
+is the whole reason sessions survive a closed tab: ttyd sends the child SIGHUP when the
+websocket drops, and all that reaches is the tmux client.
+
+The container starts as **root**, but only long enough to `chown` the Render disk
+(which is mounted root-owned) and symlink `/workspace` and `~/.claude` onto it. It then
+`exec`s `su-exec proxy`, so the shell keeps PID 1 and Render's signals still land.
+Nothing that touches the network, Claude or your repos runs as root.
+
 wireproxy and Caddy are the service — if either dies the container exits and Render
 restarts it. ttyd is an add-on, so a crash there is respawned in place (five attempts)
-and never takes the proxy down with it.
+and never takes the proxy down with it. Shutdown calls `tmux kill-server` first, giving
+Claude a chance to flush its history to the disk.
+
+Layout on the disk:
+
+```
+/data/workspace   <- /workspace      repos and working files
+/data/claude      <- ~/.claude       history, config, login
+/data/tasks/crontab                  your schedule (edit this)
+/data/logs/                          task output, cron.log
+/data/spool/proxy                    copied from tasks/crontab at boot
+```
 
 Alpine notes, in case you edit the Dockerfile: ripgrep comes from `apk`, not from the
 copy bundled with Claude Code, because that one is glibc-linked and will not run on
@@ -226,6 +289,17 @@ Fallback vars, used only when `WG_CONFIG` is unset: `WG_PRIVATE_KEY`,
   opening a deep link, and check the logs for `ttyd: exited, restarting`.
 - **502 on `/claude/` only:** ttyd died. The proxy stays up by design; the logs say
   how many restarts it has had.
+- **Permission denied all over `/workspace`:** the disk chown didn't happen. The boot
+  log should say `disk: /data mounted`; if it says `WARNING: /data is not mounted`, the
+  mount path in Render isn't `/data`.
+- **Claude starts fresh every deploy:** `~/.claude` isn't landing on the disk. Check
+  for the `disk:` line above and that `/data/claude` exists.
+- **A cron job never runs:** the boot log prints how many active jobs it parsed —
+  `cron: no active jobs` means every line in `/data/tasks/crontab` is still commented.
+  Otherwise check `/data/logs/cron.log` for the fire, and
+  `/data/logs/<name>-latest.log` for what Claude did.
+- **A cron job fires but does nothing:** almost always a blocked tool call. Widen
+  `CLAUDE_TASK_FLAGS`, or check the log for a permission prompt it couldn't answer.
 
 ## Exposure
 
@@ -240,3 +314,10 @@ reach `192.168.1.0/24` — not just Forgejo. If you turn it on: use a long rando
 password, add Render's IP allowlist, and set `CLAUDE_TERMINAL=off` again the moment
 you stop needing it. Your `ANTHROPIC_API_KEY` and `FORGEJO_TOKEN` are readable from
 that session too, so rotate them if the password ever leaks.
+
+Scheduled tasks widen this further: they run with `--dangerously-skip-permissions` by
+default, unattended, on a machine that can reach your whole LAN. A prompt that pulls in
+untrusted text — an issue body, a PR description, a web page — is a prompt someone else
+partly wrote. Keep task prompts narrow, point them at repos you control, and set
+`CLAUDE_TASK_FLAGS` to an `--allowedTools` list whenever the job doesn't genuinely need
+everything.
