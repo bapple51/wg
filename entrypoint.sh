@@ -180,6 +180,25 @@ git config --global user.name  "${GIT_AUTHOR_NAME:-Claude}"
 git config --global user.email "${GIT_AUTHOR_EMAIL:-claude@localhost}"
 git config --global --add safe.directory '*'
 
+# Claude's first run asks for a login method, whether or not
+# CLAUDE_CODE_OAUTH_TOKEN already authenticates it, and follows up with a trust
+# prompt for the working directory. A cron job cannot answer either, and in the
+# browser terminal they are just noise on a box that is already authenticated.
+# Seed the answers only when the file is absent - it is Claude's own config and
+# it owns the contents from here on.
+CLAUDE_JSON="$HOME/.claude.json"
+if [ ! -e "$CLAUDE_JSON" ]; then
+  cat > "$CLAUDE_JSON" <<'JSONEOF'
+{
+  "hasCompletedOnboarding": true,
+  "hasTrustDialogAccepted": true,
+  "bypassPermissionsModeAccepted": true
+}
+JSONEOF
+  chmod 600 "$CLAUDE_JSON"
+  echo "claude: seeded $CLAUDE_JSON (onboarding and trust prompts pre-answered)"
+fi
+
 start_ttyd() {
   # --interface lo keeps ttyd off the container's external interface, so only
   # Caddy can reach it. --auth-header makes ttyd trust the identity Caddy
