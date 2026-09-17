@@ -224,6 +224,23 @@ fi
 # Edit $DATA_DIR/tasks/crontab on the disk; it is copied into the spool each
 # boot. Jobs run as proxy, in UTC.
 CRON_PID=""
+
+# cron hands jobs a stripped environment, so a task would otherwise start with
+# no API key and fail to authenticate with nothing obvious in the log. Hand
+# claude-task the variables it cannot work without. /tmp, not the disk: these
+# are secrets, and they are rebuilt from the environment on every boot.
+TASK_ENV=/tmp/claude-task.env
+: > "$TASK_ENV"
+chmod 600 "$TASK_ENV"
+for v in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_BASE_URL \
+         HOME SHELL USE_BUILTIN_RIPGREP DISABLE_AUTOUPDATER DATA_DIR \
+         CLAUDE_TASK_FLAGS CLAUDE_TASK_DIR CLAUDE_TASK_LOG_DAYS; do
+  eval "val=\${$v:-}"
+  # Deliberately unquoted KEY=VALUE: claude-task reads it with `IFS== read`,
+  # which needs no escaping and cannot be tricked into executing anything.
+  [ -n "$val" ] && printf '%s=%s\n' "$v" "$val" >> "$TASK_ENV"
+done
+echo "tasks: environment prepared for cron jobs"
 if [ ! -e "$DATA_DIR/tasks/crontab" ] && [ -d "$DATA_DIR/tasks" ]; then
   cat > "$DATA_DIR/tasks/crontab" <<'CRONEOF'
 # Scheduled Claude tasks. Standard 5-field cron, times are UTC.

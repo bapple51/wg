@@ -12,6 +12,19 @@ set -u
 PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 
+# ...and a near-empty environment generally, so the API key and friends come
+# from the file the entrypoint wrote. Plain KEY=VALUE, read rather than sourced,
+# so nothing in it can execute. Anything already set in the environment wins,
+# which is what lets a single cron line override e.g. CLAUDE_TASK_DIR.
+TASK_ENV="${TASK_ENV:-/tmp/claude-task.env}"
+if [ -r "$TASK_ENV" ]; then
+  while IFS='=' read -r k v; do
+    [ -n "$k" ] || continue
+    eval "cur=\${$k:-}"
+    [ -n "$cur" ] || export "$k=$v"
+  done < "$TASK_ENV"
+fi
+
 DATA_DIR="${DATA_DIR:-/data}"
 LOG_DIR="$DATA_DIR/logs"
 

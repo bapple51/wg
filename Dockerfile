@@ -54,11 +54,13 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY claude-session.sh /usr/local/bin/claude-session
 COPY claude-shell.sh /usr/local/bin/claude-shell
 COPY claude-task.sh /usr/local/bin/claude-task
+COPY claude-cron.sh /usr/local/bin/claude-cron
 
 RUN set -eux; \
     chmod 0755 /usr/local/bin/caddy /usr/local/bin/wireproxy \
                /usr/local/bin/entrypoint.sh /usr/local/bin/claude-session \
-               /usr/local/bin/claude-shell /usr/local/bin/claude-task; \
+               /usr/local/bin/claude-shell /usr/local/bin/claude-task \
+               /usr/local/bin/claude-cron; \
     chown root:root /usr/local/bin/caddy /usr/local/bin/wireproxy; \
     setcap -r /usr/local/bin/caddy 2>/dev/null || true; \
     adduser -D -u 10001 proxy; \

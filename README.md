@@ -163,8 +163,16 @@ conversation back up. `claude-shell` does that automatically on boot.
 
 ### Scheduled tasks
 
-Unattended runs are plain cron. Edit `/data/tasks/crontab` — it persists, and is
-reloaded into the spool on every boot:
+Unattended runs are plain cron. From the `/claude/` terminal (or any shell in the
+container):
+
+```sh
+claude-cron edit      # opens /data/tasks/crontab, applies on save
+claude-cron           # show what's scheduled, and whether edits are pending
+claude-cron log       # tail the cron log
+```
+
+A job is one cron line calling `claude-task`:
 
 ```cron
 # 5-field cron, UTC, runs as `proxy`.
@@ -173,11 +181,29 @@ reloaded into the spool on every boot:
 
 `claude-task <name> <prompt>` runs `claude --print` and writes everything to
 `/data/logs/<name>-<timestamp>.log`, with `<name>-latest.log` pointing at the newest.
-Long prompts can live in a file: `claude-task <name> -f /data/tasks/prompts/foo.md`.
+Long prompts belong in a file: `claude-task <name> -f /data/tasks/prompts/foo.md`.
 
-The entrypoint seeds `/data/tasks/crontab` with a commented example on first boot, and
-logs how many active jobs it found. Logs older than `CLAUDE_TASK_LOG_DAYS` (14) are
-pruned after each run.
+Want to check a prompt before scheduling it? `claude-task` is just a command — run it
+by hand and read the log:
+
+```sh
+claude-task smoketest "Reply with the single word: alive"
+cat /data/logs/smoketest-latest.log
+```
+
+`/data/tasks/crontab` is on the disk, so it survives deploys; the entrypoint copies it
+into the spool at boot and `claude-cron apply` does the same live, so a schedule change
+never needs a redeploy. crond picks the new file up within a minute.
+
+Two things that bite everyone once:
+
+- **cron gives jobs an empty environment.** Your API key would not reach them. The
+  entrypoint writes the necessary variables to `/tmp/claude-task.env` and `claude-task`
+  reads them, so this is handled — but it is why you should call `claude-task` rather
+  than `claude` directly from a cron line.
+- **cron runs in UTC**, not your timezone. `0 3 * * *` is 3am UTC.
+
+Logs older than `CLAUDE_TASK_LOG_DAYS` (14) are pruned after each run.
 
 > **Permissions.** Nobody is there to approve a tool call at 3am, so `claude-task`
 > defaults to `--dangerously-skip-permissions`. Inside this container that means
