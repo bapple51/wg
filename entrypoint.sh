@@ -19,6 +19,12 @@ DATA_DIR="${DATA_DIR:-/data}"
 # this is the one thing that genuinely needs root. It ends in exec, so the
 # unprivileged shell inherits PID 1 and Render's signals still land on it.
 if [ "$(id -u)" = "0" ]; then
+  # The image's WORKDIR is /workspace, which this block is about to replace with
+  # a symlink. Step off it first: removing your own cwd leaves the process on a
+  # deleted inode, and the next command that calls getcwd() (git, reliably) dies
+  # with "Unable to read current working directory".
+  cd /
+
   if [ -d "$DATA_DIR" ]; then
     mkdir -p "$DATA_DIR/workspace" "$DATA_DIR/claude" "$DATA_DIR/logs" \
              "$DATA_DIR/tasks" "$DATA_DIR/spool"
@@ -55,6 +61,10 @@ if [ "$(id -u)" = "0" ]; then
   exec su-exec proxy "$0" "$@"
 fi
 # --- everything below runs as proxy (uid 10001) ----------------------------
+
+# The exec above inherits cwd=/ from the root phase. Land in the workspace now
+# that it points at the disk, so git and Claude both start somewhere real.
+cd /workspace 2>/dev/null || cd /
 
 [ -n "${FORGEJO_TARGET:-}" ] || die "FORGEJO_TARGET is required (e.g. 192.168.1.156:3000)"
 
